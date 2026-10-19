@@ -46,7 +46,16 @@
     successful_magic_shift dw 0 
     successful_magic_shift_pred dw 0
     score dw 0
-    msg_score db "Score:0000$"   
+    msg_score db "Score:0000$"
+    msg_game_over db "GAME OVER$"
+    msg_game_over_prompt db "R = RETRY   E = EXIT$"
+    shadow_colour db 7H
+    shadow_drawn db 0H    
+    shadow_can_move db 0H
+    shadow_pos_one dw ?, ?, ?, ?
+    shadow_pos_two dw ?, ?, ?, ?
+    shadow_pos_three dw ?, ?, ?, ?
+    shadow_pos_four dw ?, ?, ?, ?
 .code
 main proc far
     mov ax, @data
@@ -65,6 +74,7 @@ main proc far
    ;mov ax, 4C00h
    ;int 21h 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;    
+    game_restart_label:
     call draw_playground
     mov block_border_colour, 0H 
     call draw_border
@@ -90,14 +100,91 @@ main proc far
     skip_genterate_label:     
         jmp game_loop 
     game_over:        
-        mov block_border_colour, 0H 
+        mov block_border_colour, 4H
         call draw_border
+        call display_game_over
+    game_over_wait_label:
+        mov ah, 00h
+        int 16h
+        cmp al, 'r'
+        je game_over_retry_label
+        cmp al, 'R'
+        je game_over_retry_label
+        cmp al, 'e'
+        je game_over_exit_label
+        cmp al, 'E'
+        je game_over_exit_label
+        jmp game_over_wait_label
+    game_over_retry_label:
+        call reset_game
+        jmp game_restart_label
+    game_over_exit_label:
     mov ax, 4C00h
     int 21h         
 main endp 
+reset_game proc
+    mov score, 0
+    mov si, 6
+    mov dl, '0'
+reset_score_digits_label:
+    mov [msg_score+si], dl
+    inc si
+    cmp si, 10
+    jne reset_score_digits_label
+    mov not_enough_space, 0
+    mov produce_next_shape, 0
+    mov block_is_free, 0
+    mov block_is_free_simple, 0
+    mov row_is_full, 0
+    mov row_is_smart, 0
+    mov position, 1H
+    mov shift_counter, 0
+    mov random_shape_number, 0
+    mov block_colour, 4H
+    mov temp_colour, 4H
+    mov successful_magic_shift, 0
+    mov successful_magic_shift_pred, 0
+    mov shadow_drawn, 0
+    mov shadow_can_move, 0
+    call draw_playground
+    call clear_upcoming_panel
+    ret
+endp reset_game
+proc display_game_over
+    mov ah, 0ch
+    mov al, 0H
+    mov dx, 84
+game_over_panel_loop1_label:
+    mov cx, 108
+game_over_panel_loop2_label:
+    int 10h
+    inc cx
+    cmp cx, 212
+    jnz game_over_panel_loop2_label
+    inc dx
+    cmp dx, 116
+    jnz game_over_panel_loop1_label
+    mov ah, 02H
+    mov bh, 00H
+    mov dh, 11
+    mov dl, 15
+    int 10h
+    mov ah, 09H
+    lea dx, msg_game_over
+    int 21h
+    mov ah, 02H
+    mov bh, 00H
+    mov dh, 13
+    mov dl, 10
+    int 10h
+    mov ah, 09H
+    lea dx, msg_game_over_prompt
+    int 21h
+    ret
+endp display_game_over
 ;;;;;;;;
-;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
-delay proc  
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+delay proc
 delaying:   
 ;GET SYSTEM TIME.
   mov  ah, 2ch
@@ -286,10 +373,14 @@ is_this_block_free_simple proc
     mov cx, block_start_col
     mov dx, block_start_row
     int 10H 
-    cmp al, background_colour
-    jne is_this_block_free_exit_simple
+cmp al, background_colour
+    je simple_shadow_free_ok
+    cmp al, shadow_colour
+    je simple_shadow_free_ok
+    jmp is_this_block_free_exit_simple
+simple_shadow_free_ok:
     mov block_is_free_simple, 1H    
-is_this_block_free_exit_simple: 
+ is_this_block_free_exit_simple:
     mov temp_colour, al
     dec block_start_col
     dec block_start_row
@@ -310,6 +401,8 @@ is_this_block_free proc
     cmp al, block_colour
     je same_color_check:
     cmp al, background_colour
+    je same_background_check
+    cmp al, shadow_colour
     je same_background_check
 same_color_check:
     dec block_start_col
@@ -1381,8 +1474,20 @@ keyboard_actions proc
     je shape_shift_down_label 
     cmp al, 'w'
     je shape_rotate_label
+    cmp al, 'r'
+    je shape_rotate_label
     cmp al, 'f'
     je fast_shape_shift_down_label
+    ; arrow keys give AL = 0 and the scan code in AH
+    cmp ah, 4Dh
+    je shape_shift_right_label
+    cmp ah, 4Bh
+    je  shape_shift_left_label
+    cmp ah, 50h
+    je double_shape_shift_down_label
+    cmp ah, 48h
+    je hard_shape_shift_down_label
+    jmp arrow_exit
 shape_shift_right_label: 
     call shape_shift_right
     jmp arrow_exit
@@ -1395,6 +1500,12 @@ shape_shift_down_label:
 shape_rotate_label:
     call shape_rotate
     jmp arrow_exit 
+double_shape_shift_down_label:
+    call shape_shift_down
+    call shape_shift_down
+    jmp arrow_exit
+hard_shape_shift_down_label:
+    jmp fast_loop
 fast_shape_shift_down_label:
 fast_loop:
         call shape_shift_down
@@ -1679,7 +1790,10 @@ display_upcoming_2_exit:
     ret
 endp display_upcoming_2 
 generate_random_shape proc
-   mov bl, random_incoming1_shape_number 
+    ; clear any leftover ghost before a new piece spawns so the spawn
+    ; collision checks only see real bricks and game-over triggers correctly
+    call clear_shadow
+    mov bl, random_incoming1_shape_number 
    mov random_shape_number, bl
    mov bl, random_incoming2_shape_number 
    mov random_incoming1_shape_number, bl 
@@ -3195,16 +3309,16 @@ proc update_score
     mov si, 9 
     mov ax, score
     mov bx, 10
-label:
+score_loop_label:
     cmp si, 5
-    je exit_label
+    je score_done_label
     xor dx, dx
     div bx
     add dx, 30h
     mov [msg_score+si], dl
     dec si
-    jmp label
-exit_label:
+    jmp score_loop_label
+score_done_label:
     call display_score 
     ret
 endp update_score 
@@ -3359,81 +3473,152 @@ magic_shift_down_pred proc
     ret
 endp  magic_shift_down_pred
 proc predict
-        mov bx, active_block_num_one[0]  
-        mov active_block_num_one_pred[0], bx
-        mov bx, active_block_num_one[2]  
-        mov active_block_num_one_pred[2], bx 
-        mov bx, active_block_num_one[4]  
-        mov active_block_num_one_pred[4], bx 
-        mov bx, active_block_num_one[6]  
-        mov active_block_num_one_pred[6], bx 
-        mov bx, active_block_num_two[0] 
-        mov active_block_num_two_pred[0], bx 
-        mov bx, active_block_num_two[2] 
-        mov active_block_num_two_pred[2], bx
-        mov bx, active_block_num_two[4] 
-        mov active_block_num_two_pred[4], bx
-        mov bx, active_block_num_two[6] 
-        mov active_block_num_two_pred[6], bx  
-        mov bx, active_block_num_three[0]
-        mov active_block_num_three_pred[0], bx
-        mov bx, active_block_num_three[2]
-        mov active_block_num_three_pred[2], bx
-        mov bx, active_block_num_three[4]
-        mov active_block_num_three_pred[4], bx
-        mov bx, active_block_num_three[6]
-        mov active_block_num_three_pred[6], bx 
-        mov bx, active_block_num_four[0]
-        mov active_block_num_four_pred[0], bx 
-        mov bx, active_block_num_four[2]
-        mov active_block_num_four_pred[2], bx
-        mov bx, active_block_num_four[4]
-        mov active_block_num_four_pred[4], bx
-        mov bx, active_block_num_four[6]
-        mov active_block_num_four_pred[6], bx
+    call clear_shadow        
+    mov bx, active_block_num_one[0]  
+    mov active_block_num_one_pred[0], bx
+    mov bx, active_block_num_one[2]  
+    mov active_block_num_one_pred[2], bx 
+    mov bx, active_block_num_one[4]  
+    mov active_block_num_one_pred[4], bx 
+    mov bx, active_block_num_one[6]  
+    mov active_block_num_one_pred[6], bx 
+    mov bx, active_block_num_two[0] 
+    mov active_block_num_two_pred[0], bx 
+    mov bx, active_block_num_two[2] 
+    mov active_block_num_two_pred[2], bx
+    mov bx, active_block_num_two[4] 
+    mov active_block_num_two_pred[4], bx
+    mov bx, active_block_num_two[6] 
+    mov active_block_num_two_pred[6], bx  
+    mov bx, active_block_num_three[0]
+    mov active_block_num_three_pred[0], bx
+    mov bx, active_block_num_three[2]
+    mov active_block_num_three_pred[2], bx
+    mov bx, active_block_num_three[4]
+    mov active_block_num_three_pred[4], bx
+    mov bx, active_block_num_three[6]
+    mov active_block_num_three_pred[6], bx 
+    mov bx, active_block_num_four[0]
+    mov active_block_num_four_pred[0], bx 
+    mov bx, active_block_num_four[2]
+    mov active_block_num_four_pred[2], bx
+    mov bx, active_block_num_four[4]
+    mov active_block_num_four_pred[4], bx
+    mov bx, active_block_num_four[6]
+    mov active_block_num_four_pred[6], bx
+    mov shadow_can_move, 0H
 fast_loop_pred: 
-        call shape_shift_down_pred
-        cmp successful_magic_shift_pred, 0H
-        je fast_loop_pred_exit
-        jmp fast_loop_pred
-fast_loop_pred_exit: 
-    mov bl, block_colour 
-    mov block_border_colour, bl
-    mov bx, active_block_num_one_pred[0]
-    mov block_start_col, bx
-    mov bx, active_block_num_one_pred[2]
-    mov block_start_row, bx 
-    mov bx, active_block_num_one_pred[4]
-    mov block_finish_col, bx 
-    mov bx, active_block_num_one_pred[6]
-    mov block_finish_row, bx  
-    call draw_single_block_border
-    mov bx, active_block_num_two_pred[0]
-    mov block_start_col, bx
-    mov bx, active_block_num_two_pred[2]
-    mov block_start_row, bx 
-    mov bx, active_block_num_two_pred[4]
-    mov block_finish_col, bx 
-    mov bx, active_block_num_two_pred[6]
-    mov block_finish_row, bx  
-    call draw_single_block_border
-    mov bx, active_block_num_three_pred[0]
-    mov block_start_col, bx
-    mov bx, active_block_num_three_pred[2]
-    mov block_start_row, bx 
-    mov bx, active_block_num_three_pred[4]
-    mov block_finish_col, bx 
-    mov bx, active_block_num_three_pred[6]
-    mov block_finish_row, bx  
-    call draw_single_block_border
-    mov bx, active_block_num_four_pred[0]
-    mov block_start_col, bx
-    mov bx, active_block_num_four_pred[2]
-    mov block_start_row, bx 
-    mov bx, active_block_num_four_pred[4]
-    mov block_finish_col, bx 
-    mov bx, active_block_num_four_pred[6]
-    mov block_finish_row, bx  
-    call draw_single_block_border
+    call shape_shift_down_pred
+    cmp successful_magic_shift_pred, 0H
+    je fast_loop_pred_exit
+    mov shadow_can_move, 1H
+    jmp fast_loop_pred
+fast_loop_pred_exit:
+    mov shadow_drawn, 0H
+    ret
+predict_skip_draw:
+    mov shadow_drawn, 0H
     ret
 endp predict    
+draw_shadow_block proc
+    mov ah, 0ch
+    mov al, shadow_colour
+    inc block_start_col
+    inc block_start_row
+    dec block_finish_col
+    dec block_finish_row 
+    mov dx, block_start_row  
+shadow_loop3:
+    mov cx, block_start_col
+shadow_loop4:
+    int 10h
+    inc cx 
+    cmp cx, block_finish_col
+    jnz shadow_loop4
+    inc dx
+    cmp dx, block_finish_row
+    jnz shadow_loop3
+    dec block_start_col
+    dec block_start_row
+    inc block_finish_col
+    inc block_finish_row
+    ret   
+endp draw_shadow_block
+clear_shadow proc
+    cmp shadow_drawn, 0H
+    je clear_shadow_exit
+    mov bx, shadow_pos_one[0]
+    cmp bx, 0H
+    je clear_shadow_block_two
+    mov block_start_col, bx
+    mov bx, shadow_pos_one[2]
+    mov block_start_row, bx
+    mov bx, shadow_pos_one[4]
+    mov block_finish_col, bx
+    mov bx, shadow_pos_one[6]
+    mov block_finish_row, bx
+    call erase_shadow_block
+clear_shadow_block_two:
+    mov bx, shadow_pos_two[0]
+    cmp bx, 0H
+    je clear_shadow_block_three
+    mov block_start_col, bx
+    mov bx, shadow_pos_two[2]
+    mov block_start_row, bx
+    mov bx, shadow_pos_two[4]
+    mov block_finish_col, bx
+    mov bx, shadow_pos_two[6]
+    mov block_finish_row, bx
+    call erase_shadow_block
+clear_shadow_block_three:
+    mov bx, shadow_pos_three[0]
+    cmp bx, 0H
+    je clear_shadow_block_four
+    mov block_start_col, bx
+    mov bx, shadow_pos_three[2]
+    mov block_start_row, bx
+    mov bx, shadow_pos_three[4]
+    mov block_finish_col, bx
+    mov bx, shadow_pos_three[6]
+    mov block_finish_row, bx
+    call erase_shadow_block
+clear_shadow_block_four:
+    mov bx, shadow_pos_four[0]
+    cmp bx, 0H
+    je clear_shadow_done
+    mov block_start_col, bx
+    mov bx, shadow_pos_four[2]
+    mov block_start_row, bx
+    mov bx, shadow_pos_four[4]
+    mov block_finish_col, bx
+    mov bx, shadow_pos_four[6]
+    mov block_finish_row, bx
+    call erase_shadow_block
+clear_shadow_done:
+    mov shadow_drawn, 0H
+clear_shadow_exit:
+    ret
+endp clear_shadow    
+erase_shadow_block proc
+    ; repaint only the cells of the old ghost back to background;
+    ; cells already covered by a real brick are left untouched.
+    mov dx, block_start_row
+erase_shadow_outer:
+    mov cx, block_start_col
+erase_shadow_inner:
+    mov ah, 0DH
+    int 10h
+    cmp al, shadow_colour
+    jne erase_shadow_skip
+    mov ah, 0CH
+    mov al, background_colour
+    int 10h
+erase_shadow_skip:
+    inc cx
+    cmp cx, block_finish_col
+    jne erase_shadow_inner
+    inc dx
+    cmp dx, block_finish_row
+    jne erase_shadow_outer
+    ret
+endp erase_shadow_block    
